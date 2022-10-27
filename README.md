@@ -1,5 +1,5 @@
 # SQL-Query-Views-and-PLsql-Assignment
-Assignment requiring the implementation of a variety of SQL queires on a complex mock database
+Assignment requiring the implementation of various SQL queries on a complex mock database.
 
 Queries implemented:
 
