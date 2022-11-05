@@ -47,6 +47,19 @@ create or replace view Q2(nstudents,nstaff,nboth) as
 	from JustStu, JustSta, BothStuStaf;
 
 
+-- cleaner alternative
+
+create or replace view Q2 (nstudents,nstaff,nboth) as
+	select (select count(*) from people p
+	join students stu on (p.id = stu.id)),
+	(select count(*) from people p
+	join staff sta on (p.id = sta.id)),
+	(select count(*) from people p
+	join students stu on (p.id = stu.id)
+	join staff sta on (p.id = sta.id))
+;
+
+
 -- Q3: prolific Course Convenor(s)
 
 create or replace view StaffInfo(name, course_count) as
@@ -156,6 +169,34 @@ create or replace view Q5(name) as
 	where count = (select max(count) from FacSchoComms);
 
 
+-- cleaner alternative
+
+create or replace view faculties() as
+select id, name from orgunits 
+where name ~* 'faculty'
+;
+
+create or replace view faculties_and_schools as
+select f.id as id, f.name as faculty_name, ou.id as sub_id, ou.name as sub_name from faculties f
+join orgunits ou on (f.id = facultyOf(ou.id))
+;
+
+create or replace view faculties_and_schools_committees as
+select fs.id as id, fs.faculty_name as faculty_name, ou.name as name from faculties_and_schools fs
+join orgunits ou on (fs.sub_id = facultyOf(ou.id))
+;
+
+create or replace view count_committee as
+select faculty_name, count(*) from faculties_and_schools_committees
+where name ~* 'committee'
+group by id, faculty_name;
+
+create or replace view Q5(name)
+as
+select faculty_name from count_committee
+where count = (select max(count) from count_committee);
+
+
 
 -- Q6: nameOf function
 
@@ -219,6 +260,22 @@ as $$
 	where role = (select id from staff_roles where name  = 'Course Convenor') 
 			and sub.code = $1;
 $$ language sql;
+
+-- cleaner alternative
+
+create or replace function
+   Q7(subject text)
+     returns table (subject text, term text, convenor text)
+as $$
+   select s.code, t.year::varchar(255) || ' ' || t.session as session, p.name from courses c 
+   join terms t on (c.term = t.id)
+   join subjects s on (c.subject = s.id)
+   join course_staff cs on (c.id = cs.course)
+   join staff_roles sr on (cs.role = sr.id)
+   join staff sta on (sta.id = cs.staff)
+   join people p on (p.id = sta.id)
+   where sr.name ~* 'course convenor'
+   and s.code ~* $1
 
 
 -- Q8: transcript
@@ -303,6 +360,69 @@ begin
 	
 end;
 $$ language plpgsql;
+
+
+-- cleaner alternative
+
+create or replace function
+   Q8(zid integer) returns setof TranscriptRecord
+as $$
+   declare tuple record;
+   declare tr TranscriptRecord;
+
+   declare wamRecord TranscriptRecord;
+
+   declare weightedSumOfMarks integer;
+   declare totalUOCattempted integer;
+
+   declare UOCpassed integer;
+   declare wamValue float;
+begin
+   weightedSumOfMarks := 0;
+   totalUOCattempted := 0;
+   UOCpassed := 0;
+   wamValue := 0;
+   
+   for tuple in 
+      select distinct sub.code as code, substring(t.year::varchar(255),3,2) || t.session as term, pro.code as prog, substring(sub.name, 1,20) as name, ce.mark as mark, ce.grade as grade, sub.uoc as uoc
+      from people p 
+      join students s on (p.id = s.id)
+      join course_enrolments ce on (ce.student = s.id)
+      join courses co on (ce.course = co.id)
+      join subjects sub on (co.subject = sub.id)
+      join terms t on (co.term = t.id)
+      join program_enrolments pe on (pe.student = s.id and pe.term = co.term)
+      join programs pro on (pe.program = pro.id)
+      where p.unswid = zid
+      order by substring(t.year::varchar(255),3,2) || t.session, sub.code
+   loop
+      if (tuple.grade in ('PT', 'PC', 'PS', 'CR', 'DN', 'HD', 'A', 'B', 'C', 'FL')) then  
+         totalUOCattempted := totalUOCattempted + tuple.uoc;
+         weightedSumOfMarks := weightedSumOfMarks + (tuple.mark * tuple.uoc);
+      end if;
+
+      if (tuple.grade in ('SY', 'PT', 'PC', 'PS', 'CR', 'DN', 'HD', 'A', 'B', 'C', 'XE', 'T', 'PE')) then
+         UOCpassed := UOCpassed + tuple.uoc;
+      else
+         tuple.uoc := null;
+      end if;
+
+      tr := (tuple.code, tuple.term, tuple.prog, tuple.name, tuple.mark, tuple.grade, tuple.uoc);
+      return next tr;
+   end loop;
+   if (totalUOCattempted = 0) then
+      select null, null, null, 'No WAM available', null, null, null into wamRecord;
+      return next wamRecord;
+   else 
+      wamValue := ROUND(weightedSumOfMarks / totalUOCattempted);
+
+      select null, null, null, 'Overall WAM/UOC', wamValue, null, UOCpassed into wamRecord;
+      return next wamRecord;
+   end if;
+
+end;
+$$ language plpgsql;
+
 
 
 -- Q9: members of academic object group
@@ -460,6 +580,95 @@ begin
 	
 end;
 $$ language plpgsql;
+
+
+-- Cleaner alternative
+
+create or replace function
+   enumerated_query(gtype text, id text) returns setof AcObjRecord
+as $$
+   declare ret AcObjRecord;
+begin
+
+   for ret in 
+      execute 'select ''' || gtype || ''' as objtype, other.code from ' || gtype || '_group_members aob
+               join ' || gtype || 's other on (aob.' || gtype|| ' = other.id)
+               where ao_group = ' || id
+   loop
+      return next ret;
+   end loop;
+end;
+$$ language plpgsql;
+
+create or replace function
+   pattern_query(gtype text, def text) returns setof AcObjRecord
+as $$
+   declare ret AcObjRecord;
+
+   declare code text;
+   declare codes text[][];
+begin
+   select regexp_replace(def, '#', '.', 'g') into code;
+   select regexp_replace(code, '{', '(', 'g') into code;
+   select regexp_replace(code, '}', ')', 'g') into code;
+   select regexp_replace(code, ';', '|', 'g') into code;
+   
+   codes := string_to_array(code, ',');
+   
+   foreach code in array codes
+   loop 
+
+      for ret in 
+      execute 'select ''' || gtype || ''' as objtype, code from ' || gtype || 
+               's where code ~* ''' || code || ''''
+      loop
+         return next ret;
+      end loop;
+
+   end loop;
+
+end;
+$$ language plpgsql;
+
+
+
+create or replace function
+   Q9(gid integer) returns setof AcObjRecord
+   
+as $$
+   declare tuple record;
+   declare it record;
+   declare ret AcObjRecord;
+begin
+   
+   for tuple in 
+      select *  
+      from acad_object_groups 
+      where id = gid or parent = gid
+   loop
+
+   if (tuple.gdefby ~* 'enumerated') then
+      for it in 
+         select * from enumerated_query(tuple.gtype, tuple.id::varchar(255))
+      loop
+      return next it;
+      end loop;
+
+   elsif (tuple.gdefby ~* 'pattern') then
+      for it in 
+         select * from pattern_query(tuple.gtype, tuple.definition)
+      loop
+         return next it;
+      end loop;
+      
+   end if;
+
+   end loop;
+
+end;
+$$ language plpgsql;
+
+
 
 
 -- Q10: follow-on courses
